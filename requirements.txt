@@ -1,0 +1,5 @@
+flask==3.0.3
+spotipy==2.24.0
+yt-dlp==2024.8.6
+gunicorn==22.0.0
+requests==2.32.3
