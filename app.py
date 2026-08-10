@@ -2,6 +2,7 @@ import os
 import re
 import zipfile
 import tempfile
+import traceback
 from flask import Flask, request, render_template_string, send_file, jsonify
 from spotipy import Spotify
 from spotipy.oauth2 import SpotifyClientCredentials
@@ -13,13 +14,23 @@ app = Flask(__name__)
 SPOTIFY_CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET")
 
-# Initialize Spotify client
-client_credentials_manager = SpotifyClientCredentials(
-    client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET
-)
-sp = Spotify(client_credentials_manager=client_credentials_manager)
+# Check if credentials are set
+if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
+    print("⚠️ WARNING: Spotify credentials not set! Please add SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET to environment variables.")
+else:
+    print("✅ Spotify credentials loaded successfully.")
 
-# -------------------- HTML TEMPLATE (embedded) --------------------
+# Initialize Spotify client
+try:
+    client_credentials_manager = SpotifyClientCredentials(
+        client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET
+    )
+    sp = Spotify(client_credentials_manager=client_credentials_manager)
+    print("✅ Spotify client initialized successfully.")
+except Exception as e:
+    print(f"❌ Failed to initialize Spotify client: {e}")
+    sp = None
+
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -122,103 +133,124 @@ HTML_TEMPLATE = """
 </body>
 </html>
 """
-# ------------------------------------------------------------------
-
-def extract_playlist_id(url):
-    match = re.search(r"playlist/([a-zA-Z0-9]+)", url)
-    return match.group(1) if match else None
-
-def extract_track_id(url):
-    match = re.search(r"track/([a-zA-Z0-9]+)", url)
-    return match.group(1) if match else None
-
-def get_playlist_tracks(playlist_id):
-    results = sp.playlist_tracks(playlist_id)
-    tracks = results["items"]
-    while results["next"]:
-        results = sp.next(results)
-        tracks.extend(results["items"])
-    return tracks
-
-def get_track_info(track_id):
-    track = sp.track(track_id)
-    return {
-        "name": track["name"],
-        "artists": [artist["name"] for artist in track["artists"]],
-        "album": track["album"]["name"],
-        "cover_art": track["album"]["images"][0]["url"] if track["album"]["images"] else None,
-    }
-
-def download_track(track_name, artist_name, album_name, cover_art_url, output_dir):
-    query = f"{track_name} {artist_name}"
-    ydl_opts = {
-        "format": "bestaudio/best",
-        "postprocessors": [
-            {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"},
-            {"key": "FFmpegMetadata"},
-        ],
-        "outtmpl": os.path.join(output_dir, "%(title)s.%(ext)s"),
-        "quiet": True,
-        "no_warnings": True,
-        "writethumbnail": True,
-        "embedthumbnail": True,
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        try:
-            info = ydl.extract_info(f"ytsearch:{query}", download=True)["entries"][0]
-            base = ydl.prepare_filename(info).replace(".webm", "").replace(".m4a", "")
-            return f"{base}.mp3"
-        except Exception as e:
-            print(f"Failed: {track_name} - {e}")
-            return None
 
 @app.route("/")
 def index():
+    if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
+        return render_template_string(HTML_TEMPLATE.replace('<div id="message"></div>', '<div class="alert alert-danger">⚠️ Server is not configured with Spotify credentials. Please contact the administrator.</div>'))
     return render_template_string(HTML_TEMPLATE)
 
 @app.route("/download", methods=["POST"])
 def download():
+    if not sp:
+        return jsonify({"error": "Spotify client not initialized. Check credentials."}), 500
+
     url = request.form.get("url")
     if not url:
         return jsonify({"error": "No URL provided"}), 400
 
-    playlist_id = extract_playlist_id(url)
-    track_id = extract_track_id(url)
+    # Clean the URL
+    url = url.split("?")[0]  # Remove tracking parameters
+
+    playlist_id = re.search(r"playlist/([a-zA-Z0-9]+)", url)
+    track_id = re.search(r"track/([a-zA-Z0-9]+)", url)
+
     if not playlist_id and not track_id:
         return jsonify({"error": "Invalid Spotify URL"}), 400
 
-    with tempfile.TemporaryDirectory() as temp_dir:
-        downloaded = []
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            downloaded = []
 
-        if playlist_id:
-            for item in get_playlist_tracks(playlist_id):
-                track = item.get("track")
-                if not track:
-                    continue
-                info = {
-                    "name": track["name"],
-                    "artist": track["artists"][0]["name"],
-                    "album": track["album"]["name"],
-                    "cover": track["album"]["images"][0]["url"] if track["album"]["images"] else None,
-                }
-                mp3 = download_track(info["name"], info["artist"], info["album"], info["cover"], temp_dir)
-                if mp3 and os.path.exists(mp3):
-                    downloaded.append(mp3)
-        elif track_id:
-            info = get_track_info(track_id)
-            mp3 = download_track(info["name"], info["artists"][0], info["album"], info["cover_art"], temp_dir)
-            if mp3 and os.path.exists(mp3):
-                downloaded.append(mp3)
+            if playlist_id:
+                playlist_id = playlist_id.group(1)
+                # --- FIXED: Use playlist_items with additional_types=['track'] ---
+                results = sp.playlist_items(playlist_id, additional_types=['track'])
+                tracks = results["items"]
+                while results["next"]:
+                    results = sp.next(results)
+                    tracks.extend(results["items"])
+                # ----------------------------------------------------------------
 
-        if not downloaded:
-            return jsonify({"error": "No songs could be downloaded"}), 500
+                if not tracks:
+                    return jsonify({"error": "No tracks found in playlist"}), 404
 
-        zip_path = os.path.join(temp_dir, "playlist.zip")
-        with zipfile.ZipFile(zip_path, "w") as zipf:
-            for f in downloaded:
-                zipf.write(f, os.path.basename(f))
+                for item in tracks:
+                    track = item.get("track")
+                    if not track:
+                        continue
+                    track_name = track["name"]
+                    artist_name = track["artists"][0]["name"]
+                    album_name = track["album"]["name"]
 
-        return send_file(zip_path, as_attachment=True, download_name="playlist.zip", mimetype="application/zip")
+                    try:
+                        query = f"{track_name} {artist_name}"
+                        ydl_opts = {
+                            "format": "bestaudio/best",
+                            "postprocessors": [
+                                {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"},
+                                {"key": "FFmpegMetadata"},
+                            ],
+                            "outtmpl": os.path.join(temp_dir, "%(title)s.%(ext)s"),
+                            "quiet": True,
+                            "no_warnings": True,
+                            "writethumbnail": True,
+                            "embedthumbnail": True,
+                        }
+                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                            info = ydl.extract_info(f"ytsearch:{query}", download=True)["entries"][0]
+                            base = ydl.prepare_filename(info).replace(".webm", "").replace(".m4a", "")
+                            mp3_path = f"{base}.mp3"
+                            if os.path.exists(mp3_path):
+                                downloaded.append(mp3_path)
+                    except Exception as e:
+                        print(f"Failed to download {track_name}: {e}")
+                        continue
+
+            elif track_id:
+                track_id = track_id.group(1)
+                track = sp.track(track_id)
+                track_name = track["name"]
+                artist_name = track["artists"][0]["name"]
+                album_name = track["album"]["name"]
+
+                try:
+                    query = f"{track_name} {artist_name}"
+                    ydl_opts = {
+                        "format": "bestaudio/best",
+                        "postprocessors": [
+                            {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"},
+                            {"key": "FFmpegMetadata"},
+                        ],
+                        "outtmpl": os.path.join(temp_dir, "%(title)s.%(ext)s"),
+                        "quiet": True,
+                        "no_warnings": True,
+                        "writethumbnail": True,
+                        "embedthumbnail": True,
+                    }
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(f"ytsearch:{query}", download=True)["entries"][0]
+                        base = ydl.prepare_filename(info).replace(".webm", "").replace(".m4a", "")
+                        mp3_path = f"{base}.mp3"
+                        if os.path.exists(mp3_path):
+                            downloaded.append(mp3_path)
+                except Exception as e:
+                    print(f"Failed to download {track_name}: {e}")
+
+            if not downloaded:
+                return jsonify({"error": "No songs could be downloaded. Make sure the playlist is public and try again."}), 500
+
+            zip_path = os.path.join(temp_dir, "playlist.zip")
+            with zipfile.ZipFile(zip_path, "w") as zipf:
+                for f in downloaded:
+                    zipf.write(f, os.path.basename(f))
+
+            return send_file(zip_path, as_attachment=True, download_name="playlist.zip", mimetype="application/zip")
+
+    except Exception as e:
+        print(traceback.format_exc())
+        return jsonify({"error": f"Server error: {str(e)}"}), 500
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
