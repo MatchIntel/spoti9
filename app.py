@@ -166,11 +166,13 @@ def download():
             if playlist_id:
                 playlist_id = playlist_id.group(1)
 
-                # --- FIXED: Use the `playlist` endpoint with `fields` to avoid 403 ---
-                fields = "items(track(name,artists(name),album(name,images(url))),track(id))"
-                results = sp.playlist(playlist_id, fields=fields)
-                tracks = results.get("items", [])
-                # --------------------------------------------------------------------
+                # --- FIX: Use playlist_items with market to avoid 403/404 ---
+                results = sp.playlist_items(playlist_id, additional_types=['track'], market='US')
+                tracks = results["items"]
+                while results["next"]:
+                    results = sp.next(results)
+                    tracks.extend(results["items"])
+                # -------------------------------------------------------------
 
                 if not tracks:
                     return jsonify({"error": "No tracks found in playlist"}), 404
@@ -238,7 +240,7 @@ def download():
                     print(f"Failed to download {track_name}: {e}")
 
             if not downloaded:
-                return jsonify({"error": "No songs could be downloaded. Make sure the playlist is public and try again."}), 500
+                return jsonify({"error": "No songs could be downloaded. Make sure the playlist is public."}), 500
 
             zip_path = os.path.join(temp_dir, "playlist.zip")
             with zipfile.ZipFile(zip_path, "w") as zipf:
