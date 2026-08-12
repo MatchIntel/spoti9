@@ -3,6 +3,7 @@ import re
 import zipfile
 import tempfile
 import traceback
+import requests
 from flask import Flask, request, render_template_string, send_file, jsonify
 from spotipy import Spotify
 from spotipy.oauth2 import SpotifyClientCredentials
@@ -10,7 +11,7 @@ import yt_dlp
 
 app = Flask(__name__)
 
-# Spotify credentials from environment variables
+# Spotify credentials
 SPOTIFY_CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET")
 
@@ -19,18 +20,22 @@ if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
 else:
     print("✅ Spotify credentials loaded.")
 
-# Initialize Spotify client
+# Initialize Spotify client (just for getting the token)
 try:
     client_credentials_manager = SpotifyClientCredentials(
         client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET
     )
     sp = Spotify(client_credentials_manager=client_credentials_manager)
-    print("✅ Spotify client initialized.")
+    # Force token retrieval
+    token_info = sp.auth_manager.get_access_token()
+    access_token = token_info['access_token']
+    print("✅ Spotify client initialized and token obtained.")
 except Exception as e:
     print(f"❌ Spotify init failed: {e}")
     sp = None
+    access_token = None
 
-# -------------------- HTML TEMPLATE (embedded) --------------------
+# -------------------- HTML TEMPLATE (same as before) --------------------
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -141,16 +146,37 @@ def index():
         return render_template_string(HTML_TEMPLATE.replace('<div id="message"></div>', '<div class="alert alert-danger">⚠️ Server is not configured with Spotify credentials.</div>'))
     return render_template_string(HTML_TEMPLATE)
 
+def fetch_playlist_tracks(playlist_id, token):
+    """Fetch all track items from a playlist using raw requests."""
+    headers = {"Authorization": f"Bearer {token}"}
+    base_url = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks"
+    params = {
+        "limit": 100,
+        "market": "US",  # Provide a market to avoid episode issues
+    }
+    tracks = []
+    while True:
+        response = requests.get(base_url, headers=headers, params=params)
+        if response.status_code != 200:
+            raise Exception(f"Spotify API error: {response.status_code} - {response.text}")
+        data = response.json()
+        tracks.extend(data.get("items", []))
+        if data.get("next"):
+            base_url = data["next"]  # Use the next URL provided
+            params = {}  # No extra params for subsequent requests
+        else:
+            break
+    return tracks
+
 @app.route("/download", methods=["POST"])
 def download():
-    if not sp:
+    if not access_token:
         return jsonify({"error": "Spotify client not initialized. Check credentials."}), 500
 
     url = request.form.get("url")
     if not url:
         return jsonify({"error": "No URL provided"}), 400
 
-    # Clean the URL (remove tracking parameters)
     url = url.split("?")[0]
 
     playlist_id = re.search(r"playlist/([a-zA-Z0-9]+)", url)
@@ -166,17 +192,8 @@ def download():
             if playlist_id:
                 playlist_id = playlist_id.group(1)
 
-                # --- NEW APPROACH: Use the playlist endpoint directly ---
-                # This endpoint works with Client Credentials for public playlists
-                playlist = sp.playlist(playlist_id)
-                tracks_data = playlist.get("tracks", {})
-                tracks = tracks_data.get("items", [])
-
-                # Handle pagination if there are more tracks
-                while tracks_data.get("next"):
-                    tracks_data = sp.next(tracks_data)
-                    tracks.extend(tracks_data.get("items", []))
-                # ---------------------------------------------------------
+                # Fetch tracks using raw requests
+                tracks = fetch_playlist_tracks(playlist_id, access_token)
 
                 if not tracks:
                     return jsonify({"error": "No tracks found in playlist"}), 404
@@ -187,7 +204,6 @@ def download():
                         continue
                     track_name = track.get("name", "Unknown")
                     artist_name = track["artists"][0]["name"] if track.get("artists") else "Unknown"
-                    album_name = track["album"]["name"] if track.get("album") else "Unknown"
 
                     try:
                         query = f"{track_name} {artist_name}"
@@ -215,10 +231,14 @@ def download():
 
             elif track_id:
                 track_id = track_id.group(1)
-                track = sp.track(track_id)
+                # Fetch single track using raw requests
+                headers = {"Authorization": f"Bearer {access_token}"}
+                resp = requests.get(f"https://api.spotify.com/v1/tracks/{track_id}", headers=headers)
+                if resp.status_code != 200:
+                    return jsonify({"error": f"Failed to get track: {resp.text}"}), 500
+                track = resp.json()
                 track_name = track["name"]
                 artist_name = track["artists"][0]["name"]
-                album_name = track["album"]["name"]
 
                 try:
                     query = f"{track_name} {artist_name}"
@@ -244,7 +264,7 @@ def download():
                     print(f"Failed to download {track_name}: {e}")
 
             if not downloaded:
-                return jsonify({"error": "No songs could be downloaded. Make sure the playlist is public."}), 500
+                return jsonify({"error": "No songs could be downloaded. Make sure the playlist is public and contains playable tracks."}), 500
 
             zip_path = os.path.join(temp_dir, "playlist.zip")
             with zipfile.ZipFile(zip_path, "w") as zipf:
