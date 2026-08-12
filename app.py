@@ -14,11 +14,10 @@ app = Flask(__name__)
 SPOTIFY_CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET")
 
-# Check if credentials are set
 if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
-    print("⚠️ WARNING: Spotify credentials not set! Please add SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET to environment variables.")
+    print("⚠️ WARNING: Spotify credentials not set!")
 else:
-    print("✅ Spotify credentials loaded successfully.")
+    print("✅ Spotify credentials loaded.")
 
 # Initialize Spotify client
 try:
@@ -26,11 +25,12 @@ try:
         client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET
     )
     sp = Spotify(client_credentials_manager=client_credentials_manager)
-    print("✅ Spotify client initialized successfully.")
+    print("✅ Spotify client initialized.")
 except Exception as e:
-    print(f"❌ Failed to initialize Spotify client: {e}")
+    print(f"❌ Spotify init failed: {e}")
     sp = None
 
+# -------------------- HTML TEMPLATE (embedded) --------------------
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -133,11 +133,12 @@ HTML_TEMPLATE = """
 </body>
 </html>
 """
+# ------------------------------------------------------------------
 
 @app.route("/")
 def index():
     if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
-        return render_template_string(HTML_TEMPLATE.replace('<div id="message"></div>', '<div class="alert alert-danger">⚠️ Server is not configured with Spotify credentials. Please contact the administrator.</div>'))
+        return render_template_string(HTML_TEMPLATE.replace('<div id="message"></div>', '<div class="alert alert-danger">⚠️ Server is not configured with Spotify credentials.</div>'))
     return render_template_string(HTML_TEMPLATE)
 
 @app.route("/download", methods=["POST"])
@@ -149,8 +150,8 @@ def download():
     if not url:
         return jsonify({"error": "No URL provided"}), 400
 
-    # Clean the URL
-    url = url.split("?")[0]  # Remove tracking parameters
+    # Clean the URL (remove tracking parameters)
+    url = url.split("?")[0]
 
     playlist_id = re.search(r"playlist/([a-zA-Z0-9]+)", url)
     track_id = re.search(r"track/([a-zA-Z0-9]+)", url)
@@ -164,13 +165,12 @@ def download():
 
             if playlist_id:
                 playlist_id = playlist_id.group(1)
-                # --- FIXED: Use playlist_items with additional_types=['track'] ---
-                results = sp.playlist_items(playlist_id, additional_types=['track'])
-                tracks = results["items"]
-                while results["next"]:
-                    results = sp.next(results)
-                    tracks.extend(results["items"])
-                # ----------------------------------------------------------------
+
+                # --- FIXED: Use the `playlist` endpoint with `fields` to avoid 403 ---
+                fields = "items(track(name,artists(name),album(name,images(url))),track(id))"
+                results = sp.playlist(playlist_id, fields=fields)
+                tracks = results.get("items", [])
+                # --------------------------------------------------------------------
 
                 if not tracks:
                     return jsonify({"error": "No tracks found in playlist"}), 404
@@ -179,9 +179,9 @@ def download():
                     track = item.get("track")
                     if not track:
                         continue
-                    track_name = track["name"]
-                    artist_name = track["artists"][0]["name"]
-                    album_name = track["album"]["name"]
+                    track_name = track.get("name", "Unknown")
+                    artist_name = track["artists"][0]["name"] if track.get("artists") else "Unknown"
+                    album_name = track["album"]["name"] if track.get("album") else "Unknown"
 
                     try:
                         query = f"{track_name} {artist_name}"
