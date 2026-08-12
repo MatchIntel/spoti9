@@ -166,13 +166,17 @@ def download():
             if playlist_id:
                 playlist_id = playlist_id.group(1)
 
-                # --- FIX: Use playlist_items with market to avoid 403/404 ---
-                results = sp.playlist_items(playlist_id, additional_types=['track'], market='US')
-                tracks = results["items"]
-                while results["next"]:
-                    results = sp.next(results)
-                    tracks.extend(results["items"])
-                # -------------------------------------------------------------
+                # --- NEW APPROACH: Use the playlist endpoint directly ---
+                # This endpoint works with Client Credentials for public playlists
+                playlist = sp.playlist(playlist_id)
+                tracks_data = playlist.get("tracks", {})
+                tracks = tracks_data.get("items", [])
+
+                # Handle pagination if there are more tracks
+                while tracks_data.get("next"):
+                    tracks_data = sp.next(tracks_data)
+                    tracks.extend(tracks_data.get("items", []))
+                # ---------------------------------------------------------
 
                 if not tracks:
                     return jsonify({"error": "No tracks found in playlist"}), 404
