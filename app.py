@@ -10,34 +10,28 @@ from spotipy.oauth2 import SpotifyOAuth
 import yt_dlp
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "your-secret-key-here")  # Change this!
+app.secret_key = os.environ.get("SECRET_KEY", "your-secret-key-here")
 
-# Spotify credentials
 SPOTIFY_CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET")
 SPOTIFY_REDIRECT_URI = os.environ.get("SPOTIFY_REDIRECT_URI", "http://localhost:5000/callback")
 
-if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
-    print("⚠️ WARNING: Spotify credentials not set!")
-
-# Initialize Spotify OAuth
 def get_spotify_oauth():
     return SpotifyOAuth(
         client_id=SPOTIFY_CLIENT_ID,
         client_secret=SPOTIFY_CLIENT_SECRET,
         redirect_uri=SPOTIFY_REDIRECT_URI,
         scope="playlist-read-private playlist-read-collaborative",
-        cache_handler=None,  # Don't cache on server
+        cache_handler=None,
     )
 
 def get_spotify_client():
-    """Get a Spotify client using the session token."""
     token_info = session.get("token_info")
     if not token_info:
         return None
     return Spotify(auth=token_info["access_token"])
 
-# -------------------- HTML TEMPLATE --------------------
+# -------------------- HTML TEMPLATE (same) --------------------
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -161,7 +155,6 @@ HTML_TEMPLATE = """
 </html>
 """
 
-# -------------------- Routes --------------------
 @app.route("/")
 def index():
     user = None
@@ -185,7 +178,6 @@ def callback():
     code = request.args.get("code")
     if not code:
         return "Error: No code provided", 400
-    
     sp_oauth = get_spotify_oauth()
     try:
         token_info = sp_oauth.get_access_token(code)
@@ -199,18 +191,41 @@ def logout():
     session.clear()
     return redirect(url_for("index"))
 
+# ---------- NEW: Fetch playlist with raw requests (no spotipy) ----------
+def fetch_playlist_tracks_oauth(playlist_id, token):
+    """Fetch tracks using the /playlists/{id} endpoint with user's token."""
+    headers = {"Authorization": f"Bearer {token}"}
+    url = f"https://api.spotify.com/v1/playlists/{playlist_id}"
+    resp = requests.get(url, headers=headers)
+    if resp.status_code != 200:
+        raise Exception(f"Spotify API error: {resp.status_code} - {resp.text}")
+    
+    data = resp.json()
+    tracks_data = data.get("tracks", {})
+    tracks = tracks_data.get("items", [])
+    
+    while tracks_data.get("next"):
+        resp = requests.get(tracks_data["next"], headers=headers)
+        if resp.status_code != 200:
+            raise Exception(f"Pagination error: {resp.status_code}")
+        tracks_data = resp.json()
+        tracks.extend(tracks_data.get("items", []))
+    
+    return tracks
+# -----------------------------------------------------------------------
+
 @app.route("/download", methods=["POST"])
 def download():
-    sp = get_spotify_client()
-    if not sp:
+    token_info = session.get("token_info")
+    if not token_info:
         return jsonify({"error": "Please login with Spotify first."}), 401
-
+    
+    access_token = token_info["access_token"]
     url = request.form.get("url")
     if not url:
         return jsonify({"error": "No URL provided"}), 400
 
     url = url.split("?")[0]
-
     playlist_id = re.search(r"playlist/([a-zA-Z0-9]+)", url)
     track_id = re.search(r"track/([a-zA-Z0-9]+)", url)
 
@@ -223,11 +238,8 @@ def download():
 
             if playlist_id:
                 playlist_id = playlist_id.group(1)
-                results = sp.playlist_items(playlist_id, additional_types=["track"])
-                tracks = results["items"]
-                while results["next"]:
-                    results = sp.next(results)
-                    tracks.extend(results["items"])
+                # Fetch tracks using raw requests with user token
+                tracks = fetch_playlist_tracks_oauth(playlist_id, access_token)
 
                 if not tracks:
                     return jsonify({"error": "No tracks found in playlist"}), 404
@@ -265,7 +277,12 @@ def download():
 
             elif track_id:
                 track_id = track_id.group(1)
-                track = sp.track(track_id)
+                # Fetch single track via raw request
+                headers = {"Authorization": f"Bearer {access_token}"}
+                resp = requests.get(f"https://api.spotify.com/v1/tracks/{track_id}", headers=headers)
+                if resp.status_code != 200:
+                    return jsonify({"error": f"Failed to get track: {resp.text}"}), 500
+                track = resp.json()
                 track_name = track["name"]
                 artist_name = track["artists"][0]["name"]
 
